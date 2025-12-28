@@ -1,0 +1,48 @@
+#Target
+price_pln (int)
+
+#Numerical core
+area_m2 (float)              # metraż
+rooms (int)                  # liczba pokoi
+price_per_m2 (float)         # feature engineered
+floor (int)                  # piętro
+total_floors (int)           # liczba pięter w budynku
+year_built (int)             # rok budowy
+building_age (int)           # feature engineered
+
+#Lokalization
+district (category)          # Podgórze, Krowodrza, Prądnik…
+lat (float)
+lon (float)
+distance_to_center_km (float)   # feature engineered
+
+#Market
+market_type (category)       # primary / secondary
+condition (category)         # new / after_renovation / to_renovate
+ownership (category)         # ownership / cooperative
+
+#Amenities 0/1
+balcony
+terrace
+garden
+parking
+garage
+elevator
+basement
+storage_room
+
+#Offers info
+offer_type (category)        # developer / private / agency
+is_direct (bool)             # bezpośrednio
+
+#Feature engineering
+price_per_m2 = price_pln / area_m2
+area_per_room = area_m2 / rooms
+building_age = current_year - year_built
+is_top_floor = floor == total_floors
+is_ground_floor = floor == 0
+
+
+
+
+

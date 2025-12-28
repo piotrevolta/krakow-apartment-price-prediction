@@ -177,6 +177,46 @@ def _looks_like_listing(d: Dict[str, Any]) -> bool:
     return bool(has_title and has_price and has_url)
 
 
+def _get_attribute(attrs: Any, names: list[str]) -> Any:
+    """
+    attrs: list of attribute dicts or dict
+    names: possible names to match (case-insensitive)
+    """
+    if not attrs:
+        return None
+
+    if isinstance(attrs, dict):
+        attrs = attrs.values()
+
+    for a in attrs:
+        if not isinstance(a, dict):
+            continue
+
+        label = str(a.get("label") or a.get("name") or "").lower()
+        key = str(a.get("key") or "").lower()
+
+        for n in names:
+            if n in label or n in key:
+                return a.get("value")
+
+    return None
+    
+def _extract_district(d: Dict[str, Any]) -> Optional[str]:
+    loc = d.get("location") or {}
+    address = loc.get("address") or {}
+
+    for key in ["district", "neighbourhood", "quarter"]:
+        if key in address:
+            return address.get(key)
+
+    # fallback: czasem jest w path/slug
+    slug = address.get("slug")
+    if isinstance(slug, str):
+        return slug.replace("-", " ").title()
+
+    return None
+
+
 def _normalize_listing(d: Dict[str, Any]) -> Dict[str, Any]:
     title = _pick(d, "title", "name")
 
@@ -186,9 +226,25 @@ def _normalize_listing(d: Dict[str, Any]) -> Dict[str, Any]:
     area = _pick(d, "area", "areaInSquareMeters", "surface")
     area_m2 = _to_number(area)
 
-    rooms = _pick(d, "rooms", "numberOfRooms")
-    rooms_n = _to_number(rooms)
-    rooms_int = int(rooms_n) if rooms_n is not None else None
+    rooms = _get_attribute(
+        d.get("attributes") or d.get("characteristics"),
+        ["pokoje", "rooms"]
+    )
+    rooms = int(_to_number(rooms)) if rooms else None
+
+    floor = _get_attribute(
+        d.get("attributes") or d.get("characteristics"),
+        ["piętro", "floor"]
+    )
+    floor = int(_to_number(floor)) if floor else None
+
+    elevator_raw = _get_attribute(
+        d.get("attributes") or d.get("characteristics"),
+        ["winda", "elevator"]
+    )
+    elevator = 1 if str(elevator_raw).lower() in ("tak", "yes", "true") else 0
+
+    district = _extract_district(d)
 
     url = _normalize_url(_pick(d, "url", "href", "link"))
 
@@ -197,10 +253,14 @@ def _normalize_listing(d: Dict[str, Any]) -> Dict[str, Any]:
         "price_pln": price_pln,
         "currency": currency,
         "area_m2": area_m2,
-        "rooms": rooms_int,
+        "rooms": rooms,
+        "floor": floor,
+        "elevator": elevator,
+        "district": district,
         "url": url,
         "source": "otodom",
     }
+
 
 
 # ----------------------------
