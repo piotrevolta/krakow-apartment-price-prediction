@@ -19,6 +19,7 @@ Dependencies:
 from __future__ import annotations
 
 import json
+import re
 import time
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
@@ -107,7 +108,6 @@ def _to_number(x: Any) -> Optional[float]:
         return None
     if isinstance(x, (int, float)):
         return float(x)
-    # sometimes numbers arrive as strings
     if isinstance(x, str):
         try:
             return float(x.replace(",", ".").strip())
@@ -130,14 +130,12 @@ def _normalize_price(price_obj: Any) -> tuple[Optional[int], Optional[str]]:
         curr = price_obj.get("currency")
         if isinstance(value, (int, float)):
             return int(value), curr if isinstance(curr, str) else None
-        # fallback if value is string
         num = _to_number(value)
         return (int(num) if num is not None else None), curr if isinstance(curr, str) else None
 
     if isinstance(price_obj, (int, float)):
         return int(price_obj), None
 
-    # string fallback
     num = _to_number(price_obj)
     return (int(num) if num is not None else None), None
 
@@ -149,8 +147,6 @@ def _normalize_url(url: Any) -> Optional[str]:
 
     We'll convert:
       "[lang]/ad/xxx" -> "https://www.otodom.pl/pl/ad/xxx"
-
-    (Often it redirects to /pl/oferta/...; that's fine for dedup + later enrichment.)
     """
     if not isinstance(url, str) or not url.strip():
         return None
@@ -159,7 +155,6 @@ def _normalize_url(url: Any) -> Optional[str]:
     if u.startswith("[lang]"):
         u = u.replace("[lang]", "pl", 1)
 
-    # make absolute
     if u.startswith("http://") or u.startswith("https://"):
         return u
 
@@ -200,43 +195,59 @@ def _get_attribute(attrs: Any, names: list[str]) -> Any:
                 return a.get("value")
 
     return None
-    
+
+
 def _extract_district(d: Dict[str, Any]) -> Optional[str]:
     loc = d.get("location") or {}
     address = loc.get("address") or {}
 
     for key in ["district", "neighbourhood", "quarter"]:
         if key in address:
-            return address.get(key)
+            val = address.get(key)
+            return val if isinstance(val, str) else None
 
-    # fallback: czasem jest w path/slug
     slug = address.get("slug")
     if isinstance(slug, str):
         return slug.replace("-", " ").title()
 
     return None
 
-import re
 
-def _extract_rooms_from_title(title: str) -> Optional[int]:
+def _extract_rooms_from_title(title: Optional[str]) -> Optional[int]:
+    if not title:
+        return None
+    m = re.search(r"(\d+)\s*[- ]?\s*pokoj", title.lower())
+    return int(m.group(1)) if m else None
+
+
+def _extract_floor_from_title(title: Optional[str]) -> Optional[int]:
+    """
+    Simple heuristic:
+    - 'parter' -> 0
+    - 'X piętro' -> X
+    """
     if not title:
         return None
 
-    # 3-pokojowe, 2 pokojowe, 4 pokoje
-    m = re.search(r"(\d+)\s*[- ]?\s*pokoj", title.lower())
-    if m:
-        return int(m.group(1))
+    t = title.lower()
+    if "parter" in t:
+        return 0
 
-    return None
-    
-def _extract_district_from_url(url: str) -> Optional[str]:
+    m = re.search(r"(\d+)\s*pi[eę]tr", t)
+    return int(m.group(1)) if m else None
+
+
+def _extract_district_from_url(url: Optional[str]) -> Optional[str]:
     if not url:
         return None
 
+    # Example: https://www.otodom.pl/pl/ad/ruczaj-os-europejskie-ul-czerwone-maki...
     slug = url.split("/ad/")[-1]
-    slug = slug.split("-ul-")[0]   # ulica odcinamy
-    slug = slug.replace("-", " ")
-    return slug.title()
+    slug = slug.split("-ul-")[0]  # cut street part if present
+    slug = slug.replace("-", " ").strip()
+
+    return slug.title() if slug else None
+
 
 def _normalize_listing(d: Dict[str, Any]) -> Dict[str, Any]:
     title = _pick(d, "title", "name")
@@ -249,35 +260,33 @@ def _normalize_listing(d: Dict[str, Any]) -> Dict[str, Any]:
 
     rooms = _get_attribute(
         d.get("attributes") or d.get("characteristics"),
-        ["pokoje", "rooms"]
+        ["pokoje", "rooms"],
     )
     rooms = int(_to_number(rooms)) if rooms else None
-
-    # fallback z tytułu
     if rooms is None:
         rooms = _extract_rooms_from_title(title)
 
-
     floor = _get_attribute(
         d.get("attributes") or d.get("characteristics"),
-        ["piętro", "floor"]
+        ["piętro", "floor"],
     )
     floor = int(_to_number(floor)) if floor else None
-    
     if floor is None:
         floor = _extract_floor_from_title(title)
 
-
     elevator_raw = _get_attribute(
         d.get("attributes") or d.get("characteristics"),
-        ["winda", "elevator"]
+        ["winda", "elevator"],
     )
-    elevator = 1 if str(elevator_raw).lower() in ("tak", "yes", "true") else 0
-    
-    url = _normalize_url(_pick(d, "url", "href", "link"))
-    
-    district = _extract_district(d)
+    # Important: unknown != no elevator → keep None when missing
+    if elevator_raw is None or str(elevator_raw).strip() == "":
+        elevator = None
+    else:
+        elevator = 1 if str(elevator_raw).lower() in ("tak", "yes", "true") else 0
 
+    url = _normalize_url(_pick(d, "url", "href", "link"))
+
+    district = _extract_district(d)
     if district is None:
         district = _extract_district_from_url(url)
 
@@ -293,7 +302,6 @@ def _normalize_listing(d: Dict[str, Any]) -> Dict[str, Any]:
         "url": url,
         "source": "otodom",
     }
-
 
 
 # ----------------------------
@@ -337,7 +345,6 @@ def collect_raw_listings(pages: int = 1, sleep_s: Optional[float] = None) -> pd.
                 "Could not find/parse __NEXT_DATA__. The site may have changed or access is blocked."
             )
 
-        # scan props area first (usually contains page data)
         props = next_data.get("props", {})
         dict_nodes = _walk_find_dicts(props)
 
@@ -345,12 +352,11 @@ def collect_raw_listings(pages: int = 1, sleep_s: Optional[float] = None) -> pd.
             if _looks_like_listing(node):
                 rows.append(_normalize_listing(node))
 
-        # polite delay
         time.sleep(delay)
 
     df = pd.DataFrame(rows)
 
-    # De-duplicate safely (avoid dict hashing issues): use URL if available
+    # De-duplicate safely: use URL if available
     if not df.empty and "url" in df.columns:
         df = df.drop_duplicates(subset=["url"])
 
