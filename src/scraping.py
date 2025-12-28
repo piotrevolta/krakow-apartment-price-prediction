@@ -271,7 +271,7 @@ def _normalize_listing(d: Dict[str, Any]) -> Dict[str, Any]:
     floor = int(_to_number(floor)) if floor else None
     
     if floor is None:
-    floor = _extract_floor_from_title(title)
+        floor = _extract_floor_from_title(title)
 
 
     elevator_raw = _get_attribute(
