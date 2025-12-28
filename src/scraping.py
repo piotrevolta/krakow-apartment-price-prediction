@@ -237,12 +237,6 @@ def _extract_district_from_url(url: str) -> Optional[str]:
     slug = slug.split("-ul-")[0]   # ulica odcinamy
     slug = slug.replace("-", " ")
     return slug.title()
-   district = _extract_district(d)
-
-if district is None:
-    district = _extract_district_from_url(url)
-
-
 
 def _normalize_listing(d: Dict[str, Any]) -> Dict[str, Any]:
     title = _pick(d, "title", "name")
@@ -279,14 +273,13 @@ def _normalize_listing(d: Dict[str, Any]) -> Dict[str, Any]:
         ["winda", "elevator"]
     )
     elevator = 1 if str(elevator_raw).lower() in ("tak", "yes", "true") else 0
-
+    
+    url = _normalize_url(_pick(d, "url", "href", "link"))
+    
     district = _extract_district(d)
 
     if district is None:
         district = _extract_district_from_url(url)
-
-
-    url = _normalize_url(_pick(d, "url", "href", "link"))
 
     return {
         "title": title,
