@@ -23,7 +23,6 @@ import re
 import time
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
-from urllib.parse import urlparse  # noqa: F401 (kept for possible future use)
 
 import pandas as pd
 import requests
@@ -42,11 +41,13 @@ class ScrapeConfig:
     user_agent: str = "Mozilla/5.0 (Educational DS project; contact: example@example.com)"
     accept_language: str = "pl-PL,pl;q=0.9,en;q=0.8"
     timeout_s: int = 20
-    sleep_s: float = 2.0  # polite delay between result pages
 
-    # detail pages
-    detail_sleep_s: float = 1.2  # polite delay between detail pages
-    max_listings_details: Optional[int] = None  # limit detail fetches (None = all)
+    # polite delays
+    sleep_s: float = 2.0         # between result pages
+    detail_sleep_s: float = 1.2  # between detail pages
+
+    # limit detail fetches (None = all)
+    max_listings_details: Optional[int] = None
 
 
 CFG = ScrapeConfig()
@@ -204,6 +205,9 @@ def _get_attribute(attrs: Any, names: list[str]) -> Any:
 
 
 def _extract_district(d: Dict[str, Any]) -> Optional[str]:
+    """
+    Prefer structured location.address.district/neighbourhood/quarter when present.
+    """
     loc = d.get("location") or {}
     address = loc.get("address") or {}
 
@@ -244,15 +248,21 @@ def _extract_floor_from_title(title: Optional[str]) -> Optional[int]:
 
 
 def _extract_district_from_url(url: Optional[str]) -> Optional[str]:
+    """
+    Heuristic only (NOT a real district).
+    Keep as district_guess for debug, do not overwrite district from structured data.
+    """
     if not url:
         return None
 
-    # Example: https://www.otodom.pl/pl/ad/ruczaj-os-europejskie-ul-czerwone-maki...
     slug = url.split("/ad/")[-1]
-    slug = slug.split("-ul-")[0]  # cut street part if present
+    slug = slug.split("-ul-")[0]
     slug = slug.replace("-", " ").strip()
 
-    return slug.title() if slug else None
+    if not slug:
+        return None
+
+    return slug.title()
 
 
 def _normalize_listing(d: Dict[str, Any]) -> Dict[str, Any]:
@@ -292,9 +302,10 @@ def _normalize_listing(d: Dict[str, Any]) -> Dict[str, Any]:
 
     url = _normalize_url(_pick(d, "url", "href", "link"))
 
+    # IMPORTANT:
+    # district = ONLY from structured data (no guessing from URL/title)
     district = _extract_district(d)
-    if district is None:
-        district = _extract_district_from_url(url)
+    district_guess = _extract_district_from_url(url) if district is None else None
 
     return {
         "title": title,
@@ -304,7 +315,8 @@ def _normalize_listing(d: Dict[str, Any]) -> Dict[str, Any]:
         "rooms": rooms,
         "floor": floor,
         "elevator": elevator,
-        "district": district,
+        "district": district,                # real (if present)
+        "district_guess": district_guess,    # heuristic (debug only)
         "url": url,
         "source": "otodom",
     }
@@ -349,7 +361,6 @@ def _extract_jsonld(soup: BeautifulSoup) -> list[dict]:
             elif isinstance(obj, dict):
                 out.append(obj)
         except json.JSONDecodeError:
-            # Some pages may contain invalid JSON-LD; skip politely.
             continue
     return out
 
@@ -359,9 +370,8 @@ def _extract_geo_from_detail(
     soup: BeautifulSoup,
 ) -> tuple[Optional[float], Optional[float]]:
     """
-    Try Next.js state first; fallback to JSON-LD.
+    GEO (lat/lon) is extracted ONLY from detail pages (Next.js or JSON-LD).
     """
-    # 1) Try from Next.js dict nodes
     if next_data:
         props = next_data.get("props", {})
         nodes = _walk_find_dicts(props)
@@ -382,7 +392,6 @@ def _extract_geo_from_detail(
             if cand_lat is not None and cand_lon is not None:
                 return cand_lat, cand_lon
 
-    # 2) JSON-LD fallback
     for obj in _extract_jsonld(soup):
         geo = obj.get("geo") or {}
         if isinstance(geo, dict):
@@ -391,7 +400,6 @@ def _extract_geo_from_detail(
             if cand_lat is not None and cand_lon is not None:
                 return cand_lat, cand_lon
 
-        # Sometimes Offer -> itemOffered -> geo
         if obj.get("@type") == "Offer" and isinstance(obj.get("itemOffered"), dict):
             geo2 = obj["itemOffered"].get("geo") or {}
             if isinstance(geo2, dict):
@@ -406,7 +414,7 @@ def _extract_geo_from_detail(
 def _find_best_detail_node(next_data: dict) -> Optional[dict]:
     """
     Otodom detail page is also Next.js. We scan dict nodes and pick the one
-    that looks most like a full "ad" object (location + description + attributes etc.).
+    that looks most like a full "ad" object.
     """
     props = next_data.get("props", {})
     nodes = _walk_find_dicts(props)
@@ -417,8 +425,6 @@ def _find_best_detail_node(next_data: dict) -> Optional[dict]:
     for n in nodes:
         if not isinstance(n, dict):
             continue
-
-        # Must have some strong signals
         if _pick(n, "title", "name") is None:
             continue
 
@@ -436,7 +442,7 @@ def _find_best_detail_node(next_data: dict) -> Optional[dict]:
 
         attrs = n.get("attributes") or n.get("characteristics")
         if isinstance(attrs, list):
-            score += min(len(attrs), 10) / 10.0  # small bonus for richer attrs
+            score += min(len(attrs), 10) / 10.0
 
         if score > best_score:
             best_score = score
@@ -445,11 +451,119 @@ def _find_best_detail_node(next_data: dict) -> Optional[dict]:
     return best
 
 
+def _format_street_pl(street: Optional[str]) -> Optional[str]:
+    """
+    Make street look like "ul. Myśliwska" when possible.
+    If street already contains a prefix (ul., al., os., pl., etc.), keep it.
+    """
+    if not street or not isinstance(street, str):
+        return None
+    s = street.strip()
+    if not s:
+        return None
+    low = s.lower()
+    if low.startswith(("ul.", "ul ", "aleja", "al.", "al ", "os.", "os ", "pl.", "pl ")):
+        return s
+    return f"ul. {s}"
+
+
+def _extract_address_parts(address: Any) -> dict:
+    """
+    Normalize common address keys into a consistent set.
+    Otodom keys can vary; we keep it tolerant.
+    """
+    if not isinstance(address, dict):
+        return {}
+
+    # Common variants observed across listings:
+    # city, province, district, neighbourhood, quarter, county, municipality, postalCode, street, streetNumber
+    parts = {
+        "street": address.get("street"),
+        "street_number": address.get("streetNumber") or address.get("houseNumber") or address.get("number"),
+        "neighbourhood": address.get("neighbourhood") or address.get("neighborhood"),
+        "quarter": address.get("quarter"),
+        "district": address.get("district"),
+        "city": address.get("city"),
+        "municipality": address.get("municipality"),
+        "county": address.get("county"),
+        "province": address.get("province"),
+        "postal_code": address.get("postalCode") or address.get("postcode") or address.get("zip"),
+        "country": address.get("country"),
+    }
+
+    # Keep only strings
+    for k, v in list(parts.items()):
+        if v is None:
+            continue
+        if not isinstance(v, str):
+            parts[k] = None
+        else:
+            parts[k] = v.strip() if v.strip() else None
+
+    return parts
+
+
+def _build_location_label(parts: dict) -> Optional[str]:
+    """
+    Build a human-friendly label like:
+    "ul. Myśliwska, Płaszów, Podgórze, Kraków, małopolskie"
+    """
+    if not parts:
+        return None
+
+    street = _format_street_pl(parts.get("street"))
+    # optionally add number
+    if street and parts.get("street_number"):
+        street = f"{street} {parts['street_number']}"
+
+    items: list[str] = []
+    if street:
+        items.append(street)
+
+    # order similar to UI: neighbourhood/quarter, district, city, province
+    for key in ["neighbourhood", "quarter", "district", "city", "province"]:
+        val = parts.get(key)
+        if val and val not in items:
+            items.append(val)
+
+    label = ", ".join(items).strip()
+    return label if label else None
+
+
+def _extract_location_label_from_next_data(next_data: Optional[dict]) -> Optional[str]:
+    """
+    Some Next.js nodes may contain already formatted labels like:
+    locationLabel / addressLabel / fullAddress etc.
+    We scan for those.
+    """
+    if not next_data:
+        return None
+
+    props = next_data.get("props", {})
+    nodes = _walk_find_dicts(props)
+
+    candidates: list[str] = []
+    for n in nodes:
+        if not isinstance(n, dict):
+            continue
+        for k in ["locationLabel", "addressLabel", "fullAddress", "formattedAddress", "addressLine"]:
+            v = n.get(k)
+            if isinstance(v, str) and v.strip():
+                candidates.append(v.strip())
+
+    # prefer longest (usually the most complete)
+    if not candidates:
+        return None
+    candidates.sort(key=len, reverse=True)
+    return candidates[0]
+
+
 def _parse_balcony_terrace_garden(x: Any) -> tuple[Optional[int], Optional[int], Optional[int]]:
     """
     Return (balcony, terrace, garden) as 1/0/None.
-    If missing -> None. If present but says "brak"/"nie" -> 0 (for all three).
-    If present but mentions specific items -> 1/0 flags accordingly.
+    If missing -> None.
+    If string explicitly indicates none -> 0,0,0.
+    If mentions specific items -> flags accordingly.
     """
     if x is None:
         return None, None, None
@@ -457,7 +571,6 @@ def _parse_balcony_terrace_garden(x: Any) -> tuple[Optional[int], Optional[int],
     if not s:
         return None, None, None
 
-    # negative
     if any(k in s for k in ["brak", "nie", "none", "no"]):
         return 0, 0, 0
 
@@ -470,7 +583,9 @@ def _parse_balcony_terrace_garden(x: Any) -> tuple[Optional[int], Optional[int],
 def _normalize_detail_fields(detail_node: dict, next_data: dict, soup: BeautifulSoup) -> dict:
     """
     Extract extra fields from listing detail.
-    Keep unknowns as None (don't assume).
+    - Human-readable location_label is taken from detail page (Next.js/address),
+      not guessed from title/URL.
+    - GEO (lat/lon) is taken ONLY from detail page.
     """
     attrs = detail_node.get("attributes") or detail_node.get("characteristics")
 
@@ -495,25 +610,44 @@ def _normalize_detail_fields(detail_node: dict, next_data: dict, soup: Beautiful
     )
     balcony, terrace, garden = _parse_balcony_terrace_garden(balcony_terrace_garden_raw)
 
-    # location/address details
+    # location/address details (detail page)
     loc = detail_node.get("location") or {}
     address = (loc.get("address") or {}) if isinstance(loc, dict) else {}
+    parts = _extract_address_parts(address)
 
-    city = address.get("city") if isinstance(address.get("city"), str) else None
-    street = address.get("street") if isinstance(address.get("street"), str) else None
-    voivodeship = address.get("province") if isinstance(address.get("province"), str) else None
+    city = parts.get("city")
+    street = parts.get("street")
+    voivodeship = parts.get("province")
+    neighbourhood = parts.get("neighbourhood")
+    quarter = parts.get("quarter")
+    district_detail = parts.get("district") or _extract_district(detail_node)
+    postal_code = parts.get("postal_code")
 
-    # district can be better on detail
-    district = _extract_district(detail_node)
+    # "pretty" label like in UI (prefer existing label if available)
+    location_label = _extract_location_label_from_next_data(next_data)
+    if not location_label:
+        location_label = _build_location_label(
+            {
+                "street": street,
+                "street_number": parts.get("street_number"),
+                "neighbourhood": neighbourhood,
+                "quarter": quarter,
+                "district": district_detail,
+                "city": city,
+                "province": voivodeship,
+            }
+        )
 
+    # GEO (detail only)
     lat, lon = _extract_geo_from_detail(next_data, soup)
 
-    # price per m2 (compute if not present)
+    # compute price per m2 if possible (uses values from detail node)
     price_obj = _pick(detail_node, "price", "totalPrice", "priceFrom", "value")
-    price_pln, currency = _normalize_price(price_obj)
+    price_pln, _currency = _normalize_price(price_obj)
 
     area = _pick(detail_node, "area", "areaInSquareMeters", "surface")
     area_m2 = _to_number(area)
+
     price_per_m2: Optional[int] = None
     if price_pln is not None and area_m2:
         try:
@@ -526,17 +660,21 @@ def _normalize_detail_fields(detail_node: dict, next_data: dict, soup: Beautiful
     desc = _pick(detail_node, "description", "body", "content")
     description_len = len(str(desc)) if desc is not None else None
 
-    # prefer currency already normalized if present
-    _ = currency  # kept for future extensions
-
     return {
-        # geo + address
-        "city": city,
+        # precise location from detail
+        "location_label": location_label,  # e.g. "ul. Myśliwska, Płaszów, Podgórze, Kraków, małopolskie"
         "street": street,
+        "postal_code": postal_code,
+        "neighbourhood": neighbourhood,
+        "quarter": quarter,
+        "city": city,
         "voivodeship": voivodeship,
-        "district_detail": district,
+        "district_detail": district_detail,
+
+        # GEO only from detail
         "lat": lat,
         "lon": lon,
+
         # extended characteristics
         "market": market,
         "ownership": ownership,
@@ -549,6 +687,7 @@ def _normalize_detail_fields(detail_node: dict, next_data: dict, soup: Beautiful
         "parking": parking,
         "furnished": furnished,
         "available_from": available_from,
+
         # extras
         "rent_pln": rent_pln,
         "balcony": balcony,
@@ -572,24 +711,11 @@ def collect_raw_listings(pages: int = 1, sleep_s: Optional[float] = None) -> pd.
     - This function does not bypass protections. If you get blocked or the site structure changes,
       you should stop and switch to an allowed data source.
     - Start small (pages=1..2) and increase carefully.
-
-    Parameters
-    ----------
-    pages : int
-        Number of results pages to fetch (starting from 1).
-    sleep_s : float | None
-        Delay between requests; defaults to CFG.sleep_s.
-
-    Returns
-    -------
-    pandas.DataFrame
-        Raw-ish dataset with normalized basic fields.
     """
     if pages < 1:
         raise ValueError("pages must be >= 1")
 
     delay = CFG.sleep_s if sleep_s is None else float(sleep_s)
-
     rows: List[Dict[str, Any]] = []
 
     for page in range(1, pages + 1):
@@ -626,7 +752,6 @@ def enrich_with_details(
 ) -> pd.DataFrame:
     """
     Enrich an existing DataFrame (from collect_raw_listings) by visiting each detail page.
-
     Returns a new DataFrame with extra columns merged by URL.
     """
     if df is None or df.empty:
@@ -651,7 +776,8 @@ def enrich_with_details(
             next_data = _extract_next_data(html)
 
             if not next_data:
-                # If no __NEXT_DATA__, still try geo/address from JSON-LD
+                # If __NEXT_DATA__ is missing, we can still try JSON-LD GEO,
+                # but all other "pretty location" fields may be missing.
                 lat, lon = _extract_geo_from_detail(None, soup)
                 detail_rows.append({"url": url, "lat": lat, "lon": lon})
             else:
@@ -665,7 +791,6 @@ def enrich_with_details(
                     detail_rows.append(extra)
 
         except requests.HTTPError:
-            # Keep row but mark as missing; don't crash whole run
             detail_rows.append({"url": url})
         except Exception:
             detail_rows.append({"url": url})
@@ -674,6 +799,16 @@ def enrich_with_details(
 
     details_df = pd.DataFrame(detail_rows).drop_duplicates(subset=["url"])
     out = df.merge(details_df, on="url", how="left")
+
+    # final district: prefer detail, then structured list, then heuristic guess
+    if "district_detail" in out.columns:
+        out["district_final"] = out["district_detail"].fillna(out.get("district"))
+        if "district_guess" in out.columns:
+            out["district_final"] = out["district_final"].fillna(out["district_guess"])
+    elif "district_guess" in out.columns:
+        out["district_final"] = out.get("district").fillna(out["district_guess"])
+    else:
+        out["district_final"] = out.get("district")
 
     return out
 
