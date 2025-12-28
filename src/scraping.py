@@ -684,4 +684,8 @@ def collect_listings_with_details(
     detail_sleep_s: Optional[float] = None,
     max_details: Optional[int] = None,
 ) -> pd.DataFrame:
-
+    """
+    Convenience wrapper: list pages -> then enrich each listing with details.
+    """
+    df = collect_raw_listings(pages=pages, sleep_s=sleep_s)
+    return enrich_with_details(df, sleep_s=detail_sleep_s, max_listings=max_details)
