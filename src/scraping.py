@@ -195,6 +195,8 @@ def _get_attribute(attrs: Any, names: list[str]) -> Any:
                 return a.get("value")
 
     return None
+    
+
 
 
 def _extract_district(d: Dict[str, Any]) -> Optional[str]:
@@ -211,6 +213,69 @@ def _extract_district(d: Dict[str, Any]) -> Optional[str]:
         return slug.replace("-", " ").title()
 
     return None
+    
+def _extract_location_text(d: Dict[str, Any]) -> Optional[str]:
+    """
+    Tries to extract a human-readable location string like:
+    'Bonarka, Podgórze, Kraków, małopolskie'
+    """
+    # common direct labels (varies)
+    for k in ("locationLabel", "location", "address", "geoLabel"):
+        v = d.get(k)
+        if isinstance(v, str) and "," in v:
+            return v.strip()
+
+    # nested: location -> address -> (labels / parts)
+    loc = d.get("location") or {}
+    if isinstance(loc, dict):
+        # sometimes location has a label
+        for k in ("label", "name", "locationLabel"):
+            v = loc.get(k)
+            if isinstance(v, str) and "," in v:
+                return v.strip()
+
+        address = loc.get("address") or {}
+        if isinstance(address, dict):
+            # sometimes address has a label
+            for k in ("label", "fullAddress", "full", "name"):
+                v = address.get(k)
+                if isinstance(v, str) and "," in v:
+                    return v.strip()
+
+            # build from parts if present
+            parts = []
+            for key in ("neighbourhood", "district", "city", "province", "region"):
+                v = address.get(key)
+                if isinstance(v, str) and v.strip():
+                    parts.append(v.strip())
+
+            if parts:
+                return ", ".join(parts)
+
+    return None
+
+
+def _split_location(location_text: Optional[str]) -> Dict[str, Optional[str]]:
+    """
+    Split 'Bonarka, Podgórze, Kraków, małopolskie' into parts.
+    Works even if some parts are missing.
+    """
+    if not location_text:
+        return {"neighbourhood": None, "district": None, "city": None, "province": None}
+
+    parts = [p.strip() for p in location_text.split(",") if p.strip()]
+    # heuristic mapping from right side (most stable):
+    province = parts[-1] if len(parts) >= 1 else None
+    city = parts[-2] if len(parts) >= 2 else None
+    district = parts[-3] if len(parts) >= 3 else None
+    neighbourhood = ", ".join(parts[:-3]).strip() if len(parts) >= 4 else (parts[0] if len(parts) == 3 else None)
+
+    return {
+        "neighbourhood": neighbourhood or None,
+        "district": district or None,
+        "city": city or None,
+        "province": province or None,
+    }
 
 
 def _extract_rooms_from_title(title: Optional[str]) -> Optional[int]:
@@ -286,9 +351,15 @@ def _normalize_listing(d: Dict[str, Any]) -> Dict[str, Any]:
 
     url = _normalize_url(_pick(d, "url", "href", "link"))
 
-    district = _extract_district(d)
+    location_text = _extract_location_text(d)
+    loc_parts = _split_location(location_text)
+
+    # district bierz z JSON (części lokalizacji) jako priorytet
+    district = _extract_district(d) or loc_parts["district"]
     if district is None:
-        district = _extract_district_from_url(url)
+        # dopiero na końcu fallback z URL, ale lepiej go już NIE używać jako "district"
+        district = None
+
 
     return {
         "title": title,
@@ -301,6 +372,11 @@ def _normalize_listing(d: Dict[str, Any]) -> Dict[str, Any]:
         "district": district,
         "url": url,
         "source": "otodom",
+        "location_text": location_text,
+        "neighbourhood": loc_parts["neighbourhood"],
+        "district": district,
+        "city": loc_parts["city"],
+        "province": loc_parts["province"],
     }
 
 

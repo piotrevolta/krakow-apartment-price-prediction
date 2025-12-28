@@ -2,7 +2,7 @@
 price_pln (int)
 
 #Numerical core
-area_m2 (float)              # metraż
+area_m2 (float)              # metraż														OK
 rooms (int)                  # liczba pokoi
 price_per_m2 (float)         # feature engineered
 floor (int)                  # piętro
