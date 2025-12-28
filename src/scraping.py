@@ -1,4 +1,21 @@
-# src/scraping.py
+"""
+scraping.py
+
+Minimal, polite scraper for collecting apartment listing data from Otodom search results.
+
+Design goals:
+- keep logic in src/ (not in notebook)
+- avoid aggressive traffic (sleep between pages)
+- do not attempt to bypass blocks / protections
+- return a "raw but usable" DataFrame for downstream cleaning/EDA
+
+Dependencies:
+- requests
+- beautifulsoup4
+- lxml
+- pandas
+"""
+
 from __future__ import annotations
 
 import json
@@ -11,41 +28,63 @@ import requests
 from bs4 import BeautifulSoup
 
 
+# ----------------------------
+# Config
+# ----------------------------
+
+@dataclass(frozen=True)
+class ScrapeConfig:
+    base_url: str = "https://www.otodom.pl"
+    # Kraków sale apartments results page (you can change later)
+    search_url: str = "https://www.otodom.pl/pl/wyniki/sprzedaz/mieszkanie/malopolskie/krakow/krakow"
+    user_agent: str = "Mozilla/5.0 (Educational DS project; contact: example@example.com)"
+    accept_language: str = "pl-PL,pl;q=0.9,en;q=0.8"
+    timeout_s: int = 20
+    sleep_s: float = 2.0  # polite delay between pages
+
+
+CFG = ScrapeConfig()
+
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Educational DS Project)",
-    "Accept-Language": "pl-PL,pl;q=0.9,en;q=0.8",
+    "User-Agent": CFG.user_agent,
+    "Accept-Language": CFG.accept_language,
 }
 
-SEARCH_URL = "https://www.otodom.pl/pl/wyniki/sprzedaz/mieszkanie/malopolskie/krakow/krakow"
 
+# ----------------------------
+# HTTP + parsing helpers
+# ----------------------------
 
 def _fetch_html(url: str, params: Optional[dict] = None) -> str:
-    r = requests.get(url, headers=HEADERS, params=params, timeout=20)
+    r = requests.get(url, headers=HEADERS, params=params, timeout=CFG.timeout_s)
     r.raise_for_status()
     return r.text
 
 
 def _extract_next_data(html: str) -> Optional[Dict[str, Any]]:
+    """
+    Otodom uses Next.js. Often the page contains a script tag with JSON state:
+    <script id="__NEXT_DATA__"> ... </script>
+    """
     soup = BeautifulSoup(html, "lxml")
     tag = soup.select_one("script#__NEXT_DATA__")
     if not tag or not tag.text:
         return None
-    return json.loads(tag.text)
+    try:
+        return json.loads(tag.text)
+    except json.JSONDecodeError:
+        return None
 
 
-def _find_offer_dicts(obj: Any) -> List[Dict[str, Any]]:
+def _walk_find_dicts(obj: Any) -> List[Dict[str, Any]]:
     """
-    Heurystyka: w __NEXT_DATA__ szukamy list słowników, które wyglądają jak oferty.
-    Struktura bywa zmienna, więc robimy wyszukiwanie rekursywne.
+    Recursive scan over JSON for dict-like nodes. We will filter later.
     """
-    results: List[Dict[str, Any]] = []
+    out: List[Dict[str, Any]] = []
 
     def walk(x: Any):
         if isinstance(x, dict):
-            # typowe pola w ofertach (różne warianty)
-            keys = set(x.keys())
-            if {"price", "area", "rooms", "title", "url", "href"}.intersection(keys):
-                results.append(x)
+            out.append(x)
             for v in x.values():
                 walk(v)
         elif isinstance(x, list):
@@ -53,55 +92,173 @@ def _find_offer_dicts(obj: Any) -> List[Dict[str, Any]]:
                 walk(v)
 
     walk(obj)
-    # często jest dużo śmieci — na start zostawiamy, a potem zawęzimy po realnym podglądzie danych
-    return results
+    return out
 
 
-def _normalize_offer(raw: Dict[str, Any]) -> Dict[str, Any]:
-    def pick(*keys):
-        for k in keys:
-            if k in raw and raw.get(k) not in (None, ""):
-                return raw.get(k)
+def _pick(d: Dict[str, Any], *keys: str) -> Any:
+    for k in keys:
+        if k in d and d.get(k) not in (None, ""):
+            return d.get(k)
+    return None
+
+
+def _to_number(x: Any) -> Optional[float]:
+    if x is None:
         return None
+    if isinstance(x, (int, float)):
+        return float(x)
+    # sometimes numbers arrive as strings
+    if isinstance(x, str):
+        try:
+            return float(x.replace(",", ".").strip())
+        except ValueError:
+            return None
+    return None
+
+
+def _normalize_price(price_obj: Any) -> tuple[Optional[int], Optional[str]]:
+    """
+    Examples you showed:
+      {'value': 1145300, 'currency': 'PLN', '__typename': 'Money'}
+    Sometimes price may be a number or nested differently.
+    """
+    if price_obj is None:
+        return None, None
+
+    if isinstance(price_obj, dict):
+        value = price_obj.get("value")
+        curr = price_obj.get("currency")
+        if isinstance(value, (int, float)):
+            return int(value), curr if isinstance(curr, str) else None
+        # fallback if value is string
+        num = _to_number(value)
+        return (int(num) if num is not None else None), curr if isinstance(curr, str) else None
+
+    if isinstance(price_obj, (int, float)):
+        return int(price_obj), None
+
+    # string fallback
+    num = _to_number(price_obj)
+    return (int(num) if num is not None else None), None
+
+
+def _normalize_url(url: Any) -> Optional[str]:
+    """
+    Your sample:
+      [lang]/ad/....   (relative path)
+
+    We'll convert:
+      "[lang]/ad/xxx" -> "https://www.otodom.pl/pl/ad/xxx"
+
+    (Often it redirects to /pl/oferta/...; that's fine for dedup + later enrichment.)
+    """
+    if not isinstance(url, str) or not url.strip():
+        return None
+    u = url.strip()
+
+    if u.startswith("[lang]"):
+        u = u.replace("[lang]", "pl", 1)
+
+    # make absolute
+    if u.startswith("http://") or u.startswith("https://"):
+        return u
+
+    return f"{CFG.base_url}/{u.lstrip('/')}"
+
+
+def _looks_like_listing(d: Dict[str, Any]) -> bool:
+    """
+    Heuristic: listing-like dict tends to have title + price + url-ish fields.
+    This is intentionally simple for MVP.
+    """
+    has_title = _pick(d, "title", "name") is not None
+    has_price = _pick(d, "price", "totalPrice", "value", "priceFrom") is not None
+    has_url = _pick(d, "url", "href", "link") is not None
+    return bool(has_title and has_price and has_url)
+
+
+def _normalize_listing(d: Dict[str, Any]) -> Dict[str, Any]:
+    title = _pick(d, "title", "name")
+
+    price_obj = _pick(d, "price", "totalPrice", "priceFrom", "value")
+    price_pln, currency = _normalize_price(price_obj)
+
+    area = _pick(d, "area", "areaInSquareMeters", "surface")
+    area_m2 = _to_number(area)
+
+    rooms = _pick(d, "rooms", "numberOfRooms")
+    rooms_n = _to_number(rooms)
+    rooms_int = int(rooms_n) if rooms_n is not None else None
+
+    url = _normalize_url(_pick(d, "url", "href", "link"))
 
     return {
-        "title": pick("title", "name"),
-        "price": pick("price", "totalPrice", "value"),
-        "area_m2": pick("area", "areaInSquareMeters", "surface"),
-        "rooms": pick("rooms", "numberOfRooms"),
-        "url": pick("url", "href", "link"),
+        "title": title,
+        "price_pln": price_pln,
+        "currency": currency,
+        "area_m2": area_m2,
+        "rooms": rooms_int,
+        "url": url,
         "source": "otodom",
     }
 
 
-def collect_raw_listings(pages: int = 1, sleep_s: float = 2.0) -> pd.DataFrame:
+# ----------------------------
+# Public API
+# ----------------------------
+
+def collect_raw_listings(pages: int = 1, sleep_s: Optional[float] = None) -> pd.DataFrame:
     """
-    Minimalny scraping: pobiera 1..N stron wyników.
-    Bez agresywnego pobierania, bez obchodzenia blokad.
+    Collect raw listings from Otodom search results.
+
+    Notes:
+    - This function does not bypass protections. If you get blocked or the site structure changes,
+      you should stop and switch to an allowed data source.
+    - Start small (pages=1..2) and increase carefully.
+
+    Parameters
+    ----------
+    pages : int
+        Number of results pages to fetch (starting from 1).
+    sleep_s : float | None
+        Delay between requests; defaults to CFG.sleep_s.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Raw-ish dataset with normalized basic fields.
     """
+    if pages < 1:
+        raise ValueError("pages must be >= 1")
+
+    delay = CFG.sleep_s if sleep_s is None else float(sleep_s)
+
     rows: List[Dict[str, Any]] = []
 
     for page in range(1, pages + 1):
-        html = _fetch_html(SEARCH_URL, params={"page": page})
+        html = _fetch_html(CFG.search_url, params={"page": page})
         next_data = _extract_next_data(html)
+
         if not next_data:
-            # Jeśli Otodom nie serwuje __NEXT_DATA__ albo blokuje – kończymy uczciwie.
-            raise RuntimeError("Could not find __NEXT_DATA__ in HTML (site changed or access blocked).")
+            raise RuntimeError(
+                "Could not find/parse __NEXT_DATA__. The site may have changed or access is blocked."
+            )
 
-        offer_dicts = _find_offer_dicts(next_data.get("props", {}))
-        for o in offer_dicts:
-            rows.append(_normalize_offer(o))
+        # scan props area first (usually contains page data)
+        props = next_data.get("props", {})
+        dict_nodes = _walk_find_dicts(props)
 
-        time.sleep(sleep_s)
+        for node in dict_nodes:
+            if _looks_like_listing(node):
+                rows.append(_normalize_listing(node))
+
+        # polite delay
+        time.sleep(delay)
 
     df = pd.DataFrame(rows)
 
-    # deduplikacja tylko po URL (unikamy problemu z dict)
-    if "url" in df.columns:
+    # De-duplicate safely (avoid dict hashing issues): use URL if available
+    if not df.empty and "url" in df.columns:
         df = df.drop_duplicates(subset=["url"])
-    else:
-        # jeśli url nie ma, to na razie bez deduplikacji (ważniejsze, żeby działało)
-        pass
 
     return df
-
