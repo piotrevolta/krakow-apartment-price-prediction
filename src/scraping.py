@@ -94,5 +94,14 @@ def collect_raw_listings(pages: int = 1, sleep_s: float = 2.0) -> pd.DataFrame:
 
         time.sleep(sleep_s)
 
-    df = pd.DataFrame(rows).drop_duplicates()
+    df = pd.DataFrame(rows)
+
+    # deduplikacja tylko po URL (unikamy problemu z dict)
+    if "url" in df.columns:
+        df = df.drop_duplicates(subset=["url"])
+    else:
+        # jeśli url nie ma, to na razie bez deduplikacji (ważniejsze, żeby działało)
+        pass
+
     return df
+
