@@ -216,6 +216,33 @@ def _extract_district(d: Dict[str, Any]) -> Optional[str]:
 
     return None
 
+import re
+
+def _extract_rooms_from_title(title: str) -> Optional[int]:
+    if not title:
+        return None
+
+    # 3-pokojowe, 2 pokojowe, 4 pokoje
+    m = re.search(r"(\d+)\s*[- ]?\s*pokoj", title.lower())
+    if m:
+        return int(m.group(1))
+
+    return None
+    
+def _extract_district_from_url(url: str) -> Optional[str]:
+    if not url:
+        return None
+
+    slug = url.split("/ad/")[-1]
+    slug = slug.split("-ul-")[0]   # ulica odcinamy
+    slug = slug.replace("-", " ")
+    return slug.title()
+   district = _extract_district(d)
+
+if district is None:
+    district = _extract_district_from_url(url)
+
+
 
 def _normalize_listing(d: Dict[str, Any]) -> Dict[str, Any]:
     title = _pick(d, "title", "name")
@@ -232,11 +259,20 @@ def _normalize_listing(d: Dict[str, Any]) -> Dict[str, Any]:
     )
     rooms = int(_to_number(rooms)) if rooms else None
 
+    # fallback z tytułu
+    if rooms is None:
+        rooms = _extract_rooms_from_title(title)
+
+
     floor = _get_attribute(
         d.get("attributes") or d.get("characteristics"),
         ["piętro", "floor"]
     )
     floor = int(_to_number(floor)) if floor else None
+    
+    if floor is None:
+    floor = _extract_floor_from_title(title)
+
 
     elevator_raw = _get_attribute(
         d.get("attributes") or d.get("characteristics"),
@@ -245,6 +281,10 @@ def _normalize_listing(d: Dict[str, Any]) -> Dict[str, Any]:
     elevator = 1 if str(elevator_raw).lower() in ("tak", "yes", "true") else 0
 
     district = _extract_district(d)
+
+    if district is None:
+        district = _extract_district_from_url(url)
+
 
     url = _normalize_url(_pick(d, "url", "href", "link"))
 
