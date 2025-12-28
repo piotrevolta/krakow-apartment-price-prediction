@@ -19,3 +19,6 @@ End-to-end data science project focused on predicting apartment prices in Krakó
 
 ## Project structure
 See folder layout for data, notebooks and source code.
+
+
+[28.12.2025] At this stage, data collection is implemented using a dummy dataset to validate the pipeline. Real data scraping will be added in the next step.
