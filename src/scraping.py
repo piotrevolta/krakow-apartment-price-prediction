@@ -185,175 +185,16 @@ FIELD_EXTRACTORS: Dict[str, Extractor] = {
     "price_per_m2_text": _extract_price_per_m2_text,
 }
 
-# ----------------------------
-# Detail page extractors (ADD COLUMNS HERE)
-# ----------------------------
-
-DetailExtractor = Callable[[BeautifulSoup], Any]
-
-def _detail_rooms_count_text(soup: BeautifulSoup) -> Optional[str]:
-    for grid in soup.find_all("div", attrs={"data-sentry-element": "ItemGridContainer"}):
-        divs = grid.find_all("div", recursive=False)
-        if len(divs) < 2:
-            continue
-
-        label_txt = divs[0].get_text(" ", strip=True)
-        if label_txt.startswith("Liczba pokoi"):
-            val = divs[1].get_text(" ", strip=True)
-            return val or None
-
-    return None
-    
-def _detail_floor_text(soup: BeautifulSoup) -> Optional[str]:
-    for grid in soup.find_all("div", attrs={"data-sentry-element": "ItemGridContainer"}):
-        divs = grid.find_all("div", recursive=False)
-        if len(divs) < 2:
-            continue
-
-        label_txt = divs[0].get_text(" ", strip=True)
-        if label_txt.startswith("Piętro"):
-            val = divs[1].get_text(" ", strip=True)
-            return val or None
-
-    return None
-
-def _detail_has_garden(soup: BeautifulSoup) -> Optional[int]:
-    for grid in soup.find_all("div", attrs={"data-sentry-element": "ItemGridContainer"}):
-        divs = grid.find_all("div", recursive=False)
-        if len(divs) < 2:
-            continue
-
-        label_txt = divs[0].get_text(" ", strip=True)
-        if not label_txt.startswith("Informacje dodatkowe"):
-            continue
-
-        value_txt = divs[1].get_text(" ", strip=True).lower()
-        return 1 if "ogródek" in value_txt else 0
-
-    return None
-
-def _detail_has_balcony(soup: BeautifulSoup) -> Optional[int]:
-    for grid in soup.find_all("div", attrs={"data-sentry-element": "ItemGridContainer"}):
-        divs = grid.find_all("div", recursive=False)
-        if len(divs) < 2:
-            continue
-
-        label_txt = divs[0].get_text(" ", strip=True)
-        if not label_txt.startswith("Informacje dodatkowe"):
-            continue
-
-        value_txt = divs[1].get_text(" ", strip=True).lower()
-        return 1 if "balkon" in value_txt else 0
-
-    return None
-
-
-def _detail_has_parking(soup: BeautifulSoup) -> Optional[int]:
-    for grid in soup.find_all("div", attrs={"data-sentry-element": "ItemGridContainer"}):
-        divs = grid.find_all("div", recursive=False)
-        if len(divs) < 2:
-            continue
-
-        label_txt = divs[0].get_text(" ", strip=True)
-        if not label_txt.startswith("Informacje dodatkowe"):
-            continue
-
-        value_txt = divs[1].get_text(" ", strip=True).lower()
-        return 1 if "garaż/miejsce parkingowe" in value_txt else 0
-
-    return None
-
-
-def _detail_has_basement(soup: BeautifulSoup) -> Optional[int]:
-    for grid in soup.find_all("div", attrs={"data-sentry-element": "ItemGridContainer"}):
-        divs = grid.find_all("div", recursive=False)
-        if len(divs) < 2:
-            continue
-
-        label_txt = divs[0].get_text(" ", strip=True)
-        if not label_txt.startswith("Informacje dodatkowe"):
-            continue
-
-        value_txt = divs[1].get_text(" ", strip=True).lower()
-        return 1 if "piwnica" in value_txt else 0
-
-    return None
-
-
-DETAIL_EXTRACTORS: Dict[str, DetailExtractor] = {
-    # tutaj dodajesz swoje extractory dla strony oferty
-    # "detail_title": lambda soup: (soup.select_one("h1").get_text(" ", strip=True) if soup.select_one("h1") else None),
-    "floor_text": _detail_floor_text,
-    "rooms_count_text": _detail_rooms_count_text,
-    "has_garden": _detail_has_garden,
-    "has_balcony": _detail_has_balcony,
-    "has_parking": _detail_has_parking,
-    "has_basement": _detail_has_basement,
-
-
-}
-
-
-def parse_detail_page(html: str) -> Dict[str, Any]:
-    soup = BeautifulSoup(html, "lxml")
-    row: Dict[str, Any] = {}
-
-    for col_name, extractor in DETAIL_EXTRACTORS.items():
-        try:
-            row[col_name] = extractor(soup)
-        except Exception:
-            row[col_name] = None
-
-    return row
-
-
-def enrich_with_details(
-    df: pd.DataFrame,
-    max_details: Optional[int] = None,
-    sleep_s: Optional[float] = None,
-) -> pd.DataFrame:
-    """
-    Dociąga szczegóły z listing_url i dokleja kolumny z DETAIL_EXTRACTORS.
-    """
-    if "listing_url" not in df.columns:
-        raise ValueError("df must contain 'listing_url' column")
-
-    if not DETAIL_EXTRACTORS:
-        return df  # nic do dociągania
-
-    sleep_s = CFG.sleep_s if sleep_s is None else sleep_s
-
-    urls = df["listing_url"].dropna().astype(str).tolist()
-    if max_details is not None:
-        urls = urls[: max_details]
-
-    details_rows: List[Dict[str, Any]] = []
-    for url in urls:
-        html = _fetch_html(url)
-        d = parse_detail_page(html)
-        d["listing_url"] = url
-        details_rows.append(d)
-        time.sleep(sleep_s)
-
-    df_details = pd.DataFrame(details_rows)
-    return df.merge(df_details, on="listing_url", how="left")
-
-
 
 # ----------------------------
 # Parsing
 # ----------------------------
 def _find_result_cards(soup: BeautifulSoup) -> List[Tag]:
-    # tylko AdvertCard z parametrami jak w Twoim HTML
     out: List[Tag] = []
-    for art in soup.select(
-        'article[data-sentry-component="AdvertCard"][data-sentry-source-file="AdvertCard.tsx"][data-sentry-element="Container"]'
-    ):
-        # zostawiamy warunek bezpieczeństwa: ma link oferty i Address
+    for art in soup.find_all("article"):
         if art.select_one('a[href*="/pl/oferta/"]') and art.select_one('p[data-sentry-component="Address"]'):
             out.append(art)
     return out
-
 
 
 
@@ -394,13 +235,4 @@ def scrape_search(max_pages: int = 1) -> pd.DataFrame:
 
 def collect_raw_listings(max_pages: int = 1) -> pd.DataFrame:
     return scrape_search(max_pages=max_pages)
-    
-def collect_listings_with_details(
-    max_pages: int = 1,
-    max_details: Optional[int] = None,
-    sleep_s: Optional[float] = None,
-) -> pd.DataFrame:
-    df = collect_raw_listings(max_pages=max_pages)
-    return enrich_with_details(df, max_details=max_details, sleep_s=sleep_s)
-
 
