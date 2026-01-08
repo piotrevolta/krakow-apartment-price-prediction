@@ -1,0 +1,14 @@
+#Installation of environment
+
+1. Install VS code
+2. in terminal: winget install -e --id Python.Python.3.12
+3. Reset VS code
+4. In terminal: Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
+5. In terminal: py -m venv .venv
+6. In terminal: .\.venv\Scripts\Activate.ps1
+7. In terminal: python -m pip install -U pip
+8. In terminal: pip install jupyterlab ipykernel
+9. pip install numpy pandas matplotlib scikit-learn
+10. from VS code extensions install "Jupyter" and reset Vs code
+11. in VS code extensions install "Python" and reset Vs code
+12. winget install -e --id Git.Git
