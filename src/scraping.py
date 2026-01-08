@@ -216,6 +216,19 @@ def _detail_floor_text(soup: BeautifulSoup) -> Optional[str]:
             return val or None
 
     return None
+    
+def _detail_area_text(soup: BeautifulSoup) -> Optional[str]:
+    for grid in soup.find_all("div", attrs={"data-sentry-element": "ItemGridContainer"}):
+        divs = grid.find_all("div", recursive=False)
+        if len(divs) < 2:
+            continue
+
+        label_txt = divs[0].get_text(" ", strip=True)
+        if label_txt.startswith("Powierzchnia"):
+            val = divs[1].get_text(" ", strip=True)
+            return val or None
+
+    return None
 
 def _detail_has_garden(soup: BeautifulSoup) -> Optional[int]:
     for grid in soup.find_all("div", attrs={"data-sentry-element": "ItemGridContainer"}):
@@ -279,18 +292,60 @@ def _detail_has_basement(soup: BeautifulSoup) -> Optional[int]:
 
     return None
 
+def _detail_year_built_text(soup: BeautifulSoup) -> Optional[str]:
+    for grid in soup.find_all("div", attrs={"data-sentry-element": "ItemGridContainer"}):
+        divs = grid.find_all("div", recursive=False)
+        if len(divs) < 2:
+            continue
+        if divs[0].get_text(" ", strip=True).startswith("Rok budowy"):
+            val = divs[1].get_text(" ", strip=True)
+            return val or None
+    return None
+
+
+def _detail_has_elevator(soup: BeautifulSoup) -> Optional[int]:
+    for grid in soup.find_all("div", attrs={"data-sentry-element": "ItemGridContainer"}):
+        divs = grid.find_all("div", recursive=False)
+        if len(divs) < 2:
+            continue
+        if divs[0].get_text(" ", strip=True).startswith("Winda"):
+            val = divs[1].get_text(" ", strip=True).strip().lower()
+            if val in ("tak", "yes", "true", "1"):
+                return 1
+            if val in ("nie", "no", "false", "0"):
+                return 0
+            return None
+    return None
+    
+def _detail_has_storage(soup: BeautifulSoup) -> Optional[int]:
+    for grid in soup.find_all("div", attrs={"data-sentry-element": "ItemGridContainer"}):
+        divs = grid.find_all("div", recursive=False)
+        if len(divs) < 2:
+            continue
+
+        label_txt = divs[0].get_text(" ", strip=True)
+        if not label_txt.startswith("Informacje dodatkowe"):
+            continue
+
+        value_txt = divs[1].get_text(" ", strip=True).lower()
+        return 1 if "pom. użytkowe" in value_txt else 0
+
+    return None
+
 
 DETAIL_EXTRACTORS: Dict[str, DetailExtractor] = {
     # tutaj dodajesz swoje extractory dla strony oferty
     # "detail_title": lambda soup: (soup.select_one("h1").get_text(" ", strip=True) if soup.select_one("h1") else None),
+    "area_text": _detail_area_text,
     "floor_text": _detail_floor_text,
     "rooms_count_text": _detail_rooms_count_text,
     "has_garden": _detail_has_garden,
     "has_balcony": _detail_has_balcony,
     "has_parking": _detail_has_parking,
     "has_basement": _detail_has_basement,
-
-
+    "year_built_text": _detail_year_built_text,
+    "has_elevator": _detail_has_elevator,
+    "has_storage": _detail_has_storage,
 }
 
 

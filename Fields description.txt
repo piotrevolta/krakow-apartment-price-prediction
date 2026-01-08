@@ -3,9 +3,9 @@ price_pln (int)
 
 #Numerical core
 area_m2 (float)              # metraż														OK
-rooms (int)                  # liczba pokoi
-price_per_m2 (float)         # feature engineered
-floor (int)                  # piętro
+rooms (int)                  # liczba pokoi											OK
+price_per_m2 (float)         # feature engineered								
+floor (int)                  # piętro														
 total_floors (int)           # liczba pięter w budynku
 year_built (int)             # rok budowy
 building_age (int)           # feature engineered
@@ -22,14 +22,14 @@ condition (category)         # new / after_renovation / to_renovate
 ownership (category)         # ownership / cooperative
 
 #Amenities 0/1
-balcony
+balcony																													OK
 terrace
-garden
-parking
+garden																												OK
+parking																												OK
 garage
-elevator
-basement
-storage_room
+elevator																											OK
+basement																											OK
+storage_room																											OK
 
 #Offers info
 offer_type (category)        # developer / private / agency
